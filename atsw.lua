@@ -1575,7 +1575,11 @@ function ATSW_CreateTradeSkillList()
 					reagentlist={};
 					local numReagents = GetTradeSkillNumReagents(i);
 					local skillLink = GetTradeSkillItemLink(i);
-					local numMade = GetTradeSkillNumMade(i);
+					-- Use expected (average) yield so reagent math accounts for variable-output
+					-- crafts: e.g. Pygmy Oil makes 1-2 per craft, so 30 oil needs ~20 crafts, not 30.
+					local minMade, maxMade = GetTradeSkillNumMade(i);
+					local numMade = minMade;
+					if(maxMade and maxMade>minMade) then numMade = (minMade+maxMade)/2; end
 					for j=1, numReagents, 1 do
 						local reagentName, reagentTexture, reagentCount, playerReagentCount = GetTradeSkillReagentInfo(i, j);
 						local reagentLink = GetTradeSkillReagentItemLink(i,j);
@@ -1995,17 +1999,31 @@ function ATSW_NoteNecessaryItemsForQueue()
 	ATSW_FilterNecessaryItems();
 end
 
+function ATSW_GetNumMade(skillName)
+	for i=1,table.getn(atsw_tradeskilllist),1 do
+		if(atsw_tradeskilllist[i].name==skillName) then
+			return atsw_tradeskilllist[i].num;
+		end
+	end
+	return 1;
+end
+
 function ATSW_FilterNecessaryItems()
 	for i=1,table.getn(atsw_necessaryitems),1 do
 		for k=1,table.getn(atsw_queue),1 do
 			if(atsw_necessaryitems[i].name==atsw_queue[k].name) then
-				atsw_necessaryitems[i].cnt=atsw_necessaryitems[i].cnt-atsw_queue[k].count;
+				-- Subtract items the queue PRODUCES (crafts * yield), not the craft count,
+				-- so a variable-yield intermediate (e.g. 1.5 oil/craft) cancels correctly.
+				atsw_necessaryitems[i].cnt=atsw_necessaryitems[i].cnt-atsw_queue[k].count*ATSW_GetNumMade(atsw_queue[k].name);
 			end
 		end
 	end
 	for i=table.getn(atsw_necessaryitems),1,-1 do
 		if(atsw_necessaryitems[i].cnt<=0) then
 			table.remove(atsw_necessaryitems,i);
+		else
+			-- Round up any fractional remainder from average-yield math: buy whole units.
+			atsw_necessaryitems[i].cnt=math.ceil(atsw_necessaryitems[i].cnt);
 		end
 	end
 end
