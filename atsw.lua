@@ -76,6 +76,7 @@ local atsw_scan_delay=0.1;
 local atsw_scan_numtradeskills=0;
 local atsw_scan_nextskill=0;
 atsw_itemlist={};
+atsw_baginv={}; -- session-only per-bag snapshots {bag={itemname=count}} for incremental BAG_UPDATE
 atsw_orderby={};
 atsw_disabled={};
 atsw_savedqueue={};
@@ -451,7 +452,7 @@ function ATSWFrame_OnEvent()
 			atsw_retrydelay=ATSW_MAX_DELAY;
 		end
 		ATSW_ResetPossibleItemCounts();
-		ATSWInv_UpdateItemList();
+		ATSWInv_UpdateItemList(arg1); -- arg1 = changed bag; rescan just that bag
 		ATSWBank_UpdateBankList();
 		if(GetTradeSkillSelectionIndex()>0 and ATSWFrame:IsVisible()) then
 			ATSWFrame_SetSelection(GetTradeSkillSelectionIndex());
@@ -1300,15 +1301,19 @@ function ATSWFrame_UpdateQueue()
 		local queueName=getglobal("ATSWQueueItem"..i.."NameText");
 		local queueItem=getglobal("ATSWQueueItem"..i);
 		local queueButton=getglobal("ATSWQueueItem"..i.."DeleteButton");
+		local postponeButton=getglobal("ATSWQueueItem"..i.."PostponeButton");
 		if(atsw_queue[jobindex]) then
 			queueCount:SetText(atsw_queue[jobindex].count.."x");
 			queueName:SetText(atsw_queue[jobindex].name);
 			queueItem.jobindex=jobindex;
 			queueButton.jobindex=jobindex;
+			postponeButton.jobindex=jobindex;
 			queueItem:Show();
 			queueButton:Show();
+			postponeButton:Show();
 		else
 			queueButton:Hide();
+			postponeButton:Hide();
 			queueItem:Hide();
 		end
 	end
@@ -1383,6 +1388,18 @@ function ATSW_DeleteJob(jobindex)
 		if(atsw_preventupdate==false) then
 			ATSW_ResetPossibleItemCounts();
 			ATSWInv_UpdateQueuedItemList();
+			ATSWFrame_UpdateQueue();
+			ATSWFrame_Update();
+		end
+	end
+end
+
+-- Move a queued job to the end of the queue so the next item gets crafted now.
+function ATSW_PostponeJob(jobindex)
+	if(atsw_queue[jobindex] and table.getn(atsw_queue)>1) then
+		local job=table.remove(atsw_queue,jobindex);
+		table.insert(atsw_queue,job);
+		if(atsw_preventupdate==false) then
 			ATSWFrame_UpdateQueue();
 			ATSWFrame_Update();
 		end
@@ -1866,19 +1883,25 @@ function ATSW_GetNumItemsPossibleCached(skillName,cacheTable)
 	if(atsw_considermerchants==true and ATSW_CheckIfCreatedOnlyWithVendorStuff(skillName)==true) then
 		atsw_considermerchants=false;
 	end
-	local i;
 	local temporaryitemlist=atsw_temporaryitemlist;
-	for i=1,500,1 do
+	-- ATSW_CheckIfPossible(skill,n) is monotonic (makeable n => makeable n-1), so binary
+	-- search the largest makeable count instead of the old linear 1..500 scan. That scan
+	-- ran a recursive reagent-tree walk for every count up to the max, which is the bulk of
+	-- the stall on each craft/BAG_UPDATE; this cuts it to ~log2(500) ~= 9 checks.
+	local lo,hi=0,500;
+	while(lo<hi) do
+		local mid=math.floor((lo+hi)/2)+1; -- bias up so lo can advance and the loop terminates
 		ATSW_ClearTable(temporaryitemlist);
-		if(ATSW_CheckIfPossible(skillName,i)==false) then 
-			ATSW_ClearTable(temporaryitemlist);
-			if(cacheTable) then cacheTable[skillName]=(i-1); end
-			atsw_considermerchants=atsw_considermerchants_backup;
-			return (i-1);
+		if(ATSW_CheckIfPossible(skillName,mid)==false) then
+			hi=mid-1;
+		else
+			lo=mid;
 		end
 	end
+	ATSW_ClearTable(temporaryitemlist);
+	if(cacheTable) then cacheTable[skillName]=lo; end
 	atsw_considermerchants=atsw_considermerchants_backup;
-	return 0;
+	return lo;
 end
 
 function ATSW_GetNumItemsPossibleWithInventory(skillName)
@@ -2571,23 +2594,51 @@ function ATSWInv_GetItemName(bag, slot)
     end
 end
 
-function ATSWInv_UpdateItemList()
+-- Scan one bag into target={itemname=count}.
+function ATSWInv_ScanBag(container, target)
+	for slot=1, GetContainerNumSlots(container), 1 do
+		local itemname=ATSWInv_GetItemName(container,slot);
+		if(itemname) then
+			local _, itemcount=GetContainerItemInfo(container, slot);
+			target[itemname]=(target[itemname] or 0)+(itemcount or 1);
+		end
+	end
+end
+
+-- changedBag (BAG_UPDATE's arg1) lets us rescan just that bag and apply the delta to the
+-- aggregate item map instead of rescanning all 5 bags. Falls back to a full rebuild when no
+-- prior snapshot exists or the changed bag isn't a normal backpack/bag (0-4).
+function ATSWInv_UpdateItemList(changedBag)
 	if(atsw_incombat==true) then return; end
 	if(not atsw_itemlist[GetRealmName()]) then
 		atsw_itemlist[GetRealmName()]={};
 	end
-	atsw_itemlist[GetRealmName()][UnitName("player")]={};
-	for container=0, 4, 1 do
-		for slot=1, GetContainerNumSlots(container), 1 do
-			local itemname=ATSWInv_GetItemName(container,slot);
-			if(itemname) then
-				local _, itemcount=GetContainerItemInfo(container, slot);
-				if(atsw_itemlist[GetRealmName()][UnitName("player")][itemname]) then
-					atsw_itemlist[GetRealmName()][UnitName("player")][itemname]=atsw_itemlist[GetRealmName()][UnitName("player")][itemname]+itemcount;
-				else
-					atsw_itemlist[GetRealmName()][UnitName("player")][itemname]=itemcount;
-					--table.setn(atsw_itemlist[GetRealmName()][UnitName("player")],table.getn(atsw_itemlist[GetRealmName()][UnitName("player")])+1);
-				end
+	local agg=atsw_itemlist[GetRealmName()][UnitName("player")];
+	if(changedBag and changedBag>=0 and changedBag<=4 and agg and atsw_baginv[changedBag]) then
+		-- Incremental: subtract the bag's old contents, add its new contents.
+		for itemname,cnt in pairs(atsw_baginv[changedBag]) do
+			if(agg[itemname]) then
+				agg[itemname]=agg[itemname]-cnt;
+				if(agg[itemname]<=0) then agg[itemname]=nil; end
+			end
+		end
+		local new={};
+		ATSWInv_ScanBag(changedBag,new);
+		for itemname,cnt in pairs(new) do
+			agg[itemname]=(agg[itemname] or 0)+cnt;
+		end
+		atsw_baginv[changedBag]=new;
+	else
+		-- Full rebuild of the aggregate and every per-bag snapshot.
+		agg={};
+		atsw_itemlist[GetRealmName()][UnitName("player")]=agg;
+		atsw_baginv={};
+		for container=0, 4, 1 do
+			local b={};
+			ATSWInv_ScanBag(container,b);
+			atsw_baginv[container]=b;
+			for itemname,cnt in pairs(b) do
+				agg[itemname]=(agg[itemname] or 0)+cnt;
 			end
 		end
 	end

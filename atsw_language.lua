@@ -10,6 +10,11 @@
 
 ATSW_VERSION = "ATSW v0.7.8 - by Slarti on EU-Blackhand";
 
+-- Per-row "postpone" button letter (moves a queued job to the end of the queue)
+ATSW_POSTPONELETTER = "P";
+ATSW_DELETETOOLTIP = "Delete";
+ATSW_POSTPONETOOLTIP = "Postpone";
+
 if(GetLocale()=="deDE") then
 	ATSW_SORTBYHEADERS = "nach Kategorien sortieren";
 	ATSW_SORTBYNAMES = "nach Namen sortieren";
