@@ -84,6 +84,8 @@ atsw_is_sorted=false;
 atsw_prescanned={};
 atsw_newrecipelinks=true;
 atsw_onlycreatable=false;
+atsw_crafttimes={};
+ATSW_DEFAULT_CRAFT_TIME=3.0;
 
 function ATSW_OnLoad()
 	SLASH_ATSW1 = "/atsw";
@@ -304,7 +306,12 @@ function ATSW_CheckForTradeSkillWindow(arg1)
 		end
 		ATSW_CheckForRescan();
 	end
-	if(atsw_processnext==true) then 
+	atsw_crafttimeaccum=(atsw_crafttimeaccum or 0)+arg1;
+	if(atsw_crafttimeaccum>=0.1) then
+		atsw_crafttimeaccum=0;
+		ATSW_UpdateProcessButtonTime();
+	end
+	if(atsw_processnext==true) then
 		atsw_processnext=false;
 		ATSW_ProcessNextQueueItem();
 	end
@@ -1227,6 +1234,62 @@ function ATSWCollapseAllButton_OnClick()
 	ATSWFrame_Update();
 end
 
+-- ===== craft-time estimation =====
+function ATSW_GetCraftSpellId(skillName)
+	for i=1,table.getn(atsw_tradeskilllist),1 do
+		if(atsw_tradeskilllist[i].name==skillName and atsw_tradeskilllist[i].recipelink) then
+			local _,_,id=string.find(atsw_tradeskilllist[i].recipelink,"enchant:(%d+)");
+			if(id) then return tonumber(id); end
+		end
+	end
+	return nil;
+end
+
+-- Per-craft seconds: measured (cached, self-correcting) > recipe spell cast time > default.
+function ATSW_GetCraftTime(skillName)
+	if(atsw_crafttimes[skillName] and atsw_crafttimes[skillName]>0) then
+		return atsw_crafttimes[skillName];
+	end
+	local id=ATSW_GetCraftSpellId(skillName);
+	if(id) then
+		local castms=select(7,GetSpellInfo(id));
+		if(castms and castms>0) then return castms/1000; end
+	end
+	return ATSW_DEFAULT_CRAFT_TIME;
+end
+
+function ATSW_FormatDuration(sec)
+	if(sec==nil or sec<0) then sec=0; end
+	sec=math.floor(sec+0.5);
+	if(sec<60) then return sec.."s"; end
+	local m=math.floor(sec/60);
+	local s=sec-m*60;
+	if(m<60) then return m.."m "..s.."s"; end
+	local h=math.floor(m/60);
+	m=m-h*60;
+	return h.."h "..m.."m";
+end
+
+-- While a craft is actively casting, replace the Process Queue button label with the
+-- remaining time for the current queue item (e.g. all 20 flasks). Gated on an active
+-- cast so it never clobbers the button's Start/Continue/Stop states. Restores the
+-- normal label once the queue drains.
+function ATSW_UpdateProcessButtonTime()
+	if(not ATSWQueueStartStopButton) then return; end
+	local _,_,_,_,_,endTime=UnitCastingInfo("player");
+	if(endTime and atsw_queue[1]) then
+		local castremain=endTime/1000-GetTime();
+		if(castremain<0) then castremain=0; end
+		local crafts=atsw_queue[1].count-1; -- in-progress craft accounted for by castremain
+		if(crafts<0) then crafts=0; end
+		ATSWQueueStartStopButton:SetText(ATSW_FormatDuration(castremain+crafts*ATSW_GetCraftTime(atsw_queue[1].name)));
+		atsw_buttontimed=true;
+	elseif(atsw_buttontimed) then
+		atsw_buttontimed=false;
+		if(not atsw_queue[1]) then ATSWQueueStartStopButton:SetText(ATSW_STARTQUEUE); end
+	end
+end
+
 function ATSWFrame_UpdateQueue()
 	local jobs=table.getn(atsw_queue);
 	local offset=FauxScrollFrame_GetOffset(ATSWQueueScrollFrame);
@@ -1471,6 +1534,12 @@ end
 
 function ATSW_SpellcastStop()
 	atsw_working=false;
+	-- Cache the real cast duration so future estimates for this recipe are exact.
+	if(atsw_caststarttime and atsw_castingname) then
+		local dur=GetTime()-atsw_caststarttime;
+		if(dur>0.2 and dur<60) then atsw_crafttimes[atsw_castingname]=dur; end
+		atsw_caststarttime=nil;
+	end
 	if(atsw_queue[1]) then
 		atsw_lastremoved=atsw_processingname;
 		ATSW_DeleteJobPartial(atsw_processingname,1);
@@ -1520,6 +1589,8 @@ function ATSW_SpellcastStart()
 	atsw_retry=false;
 	atsw_retrydelay=0;
 	atsw_processingtimeout=0;
+	atsw_caststarttime=GetTime();
+	atsw_castingname=atsw_processingname;
 end
 
 function ATSWDBF_OnOK()
