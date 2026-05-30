@@ -2724,9 +2724,17 @@ end
 atsw_displayshoppinglist=true;
 
 function ATSWAuction_ShowShoppingList()
-	if(AuctionFrame:IsVisible() and ATSWAuction_UpdateReagentList()>0 and atsw_displayshoppinglist) then
+	-- aux replaces the Blizzard AH UI: it hides AuctionFrame and shows AuxFrame,
+	-- so anchor to AuxFrame's bottom when aux is loaded instead of the hidden default frame.
+	local useaux = (AuxFrame ~= nil);
+	if((AuctionFrame:IsVisible() or useaux) and ATSWAuction_UpdateReagentList()>0 and atsw_displayshoppinglist) then
 		ATSWShoppingListFrame:Show();
-		ATSWShoppingListFrame:SetPoint("TOPLEFT","AuctionFrame","TOPLEFT",353,-436);
+		ATSWShoppingListFrame:ClearAllPoints();
+		if(useaux) then
+			ATSWShoppingListFrame:SetPoint("TOPRIGHT","AuxFrame","BOTTOMRIGHT",0,0);
+		else
+			ATSWShoppingListFrame:SetPoint("TOPLEFT","AuctionFrame","TOPLEFT",353,-436);
+		end
 		ATSW_NoteNecessaryItemsForQueue();
 		ATSWAuction_UpdateReagentList();
 	end
@@ -2819,6 +2827,19 @@ function ATSWAuction_UpdateReagentList()
 end
 
 function ATSWAuction_SearchForItem(itemname)
+	-- When aux is loaded, fill aux's search box and run the search (exact name),
+	-- i.e. the same as typing the name and clicking aux's Search button.
+	-- aux is optional; fall back to the stock Blizzard browse when absent.
+	if(AuxFrame and require) then
+		local ok, search = pcall(require, "aux.tabs.search");
+		if(ok and search and search.set_filter and search.execute) then
+			local okaux, auxmod = pcall(require, "aux");
+			if(okaux and auxmod and auxmod.set_tab) then auxmod.set_tab(1); end -- bring Search tab forward
+			search.set_filter(strlower(itemname) .. "/exact");
+			search.execute(nil, false);
+			return;
+		end
+	end
 	if(CanSendAuctionQuery()) then
 		BrowseName:SetText(itemname);
 		AuctionFrameBrowse_Search();
