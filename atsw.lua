@@ -87,6 +87,8 @@ atsw_newrecipelinks=true;
 atsw_onlycreatable=false;
 atsw_crafttimes={};
 ATSW_DEFAULT_CRAFT_TIME=3.0;
+atsw_bagdirty=false;
+atsw_bagdirtydelay=0;
 
 function ATSW_OnLoad()
 	SLASH_ATSW1 = "/atsw";
@@ -183,10 +185,13 @@ function ATSW_GetSelectedSkill()
 end
 
 function ATSW_CheckForRescan()
-	atsw_scans=0;
 	skillname=GetTradeSkillLine();
 	if(skillname) then
 		if(skillname~=atsw_displayedgroup) then
+			-- Reset the scan limiter only on an actual profession change. Doing it every
+			-- frame (as before) defeated the atsw_scans<2 guard, so every TRADE_SKILL_UPDATE
+			-- ran a full recipe rescan -- ~10ms x hundreds of events = the bag-change lag.
+			atsw_scans=0;
 			if(atsw_displayedgroup~="") then
 				ATSW_SaveQueue(false);
 			end
@@ -312,6 +317,15 @@ function ATSW_CheckForTradeSkillWindow(arg1)
 		atsw_crafttimeaccum=0;
 		ATSW_UpdateProcessButtonTime();
 	end
+	-- Coalesced recompute after a burst of BAG_UPDATEs has settled.
+	if(atsw_bagdirty==true) then
+		atsw_bagdirtydelay=atsw_bagdirtydelay-arg1;
+		if(atsw_bagdirtydelay<=0) then
+			atsw_bagdirty=false;
+			ATSWFrame_Update();
+			if(GetTradeSkillSelectionIndex()>0) then ATSWFrame_SetSelection(GetTradeSkillSelectionIndex()); end
+		end
+	end
 	if(atsw_processnext==true) then
 		atsw_processnext=false;
 		ATSW_ProcessNextQueueItem();
@@ -372,6 +386,7 @@ function ATSWFrame_OnEvent()
 	if(event=="TRADE_SKILL_SHOW") then
 		--if(CraftFrame and CraftFrame:IsVisible()) then ATSW_HideWindow(); end
 		--atsw_oldmode=false;
+		atsw_scans=0; -- allow a fresh scan each time the window opens (catches learned recipes)
 		ATSW_GetSelectedSkill();
 		if(ATSW_IsEnabled()) then
 			local version,build,date=GetBuildInfo();
@@ -451,11 +466,16 @@ function ATSWFrame_OnEvent()
 			atsw_retries=0;
 			atsw_retrydelay=ATSW_MAX_DELAY;
 		end
-		ATSW_ResetPossibleItemCounts();
-		ATSWInv_UpdateItemList(arg1); -- arg1 = changed bag; rescan just that bag
+		-- Cheap per-event work: rescan just the changed bag, then invalidate only the cached
+		-- counts for recipes whose reagents actually changed (most bag ops touch none of the
+		-- visible recipes). Defer the ATSWFrame_Update recompute to a coalesced pass after the
+		-- burst settles -- a single inventory op can fire 100+ BAG_UPDATEs.
+		ATSWInv_UpdateItemList(arg1, true); -- arg1 = changed bag; true = skip the frame update
+		ATSW_InvalidateChangedCounts();
 		ATSWBank_UpdateBankList();
-		if(GetTradeSkillSelectionIndex()>0 and ATSWFrame:IsVisible()) then
-			ATSWFrame_SetSelection(GetTradeSkillSelectionIndex());
+		if(ATSWFrame:IsVisible()) then
+			atsw_bagdirty=true;
+			atsw_bagdirtydelay=0.15;
 		end
 	end
 	if(not ATSWFrame:IsVisible()) then
@@ -1654,6 +1674,8 @@ function ATSW_CreateTradeSkillList()
 	atsw_oldtradeskillheaders=atsw_tradeskillheaders;
 	atsw_tradeskilllist={};
 	atsw_tradeskillheaders={};
+	atsw_itemusers=nil; -- reagent index is stale once the recipe list changes; rebuild lazily
+	atsw_skillindex=nil; -- name->index map likewise
 
 	--if(atsw_oldmode) then 
 	--	table.insert(atsw_tradeskillheaders,{name="invisibleheader",id=0,list={},expanded=true});
@@ -1935,6 +1957,63 @@ end
 function ATSW_ResetPossibleItemCounts()
 	atsw_tradeskillcountcache={};
 	atsw_tradeskillcountwithinventorycache={};
+	atsw_changeditems=nil;
+	atsw_changedall=false;
+end
+
+-- Reverse index: reagent item name -> set of recipe names whose (transitive) reagent
+-- closure includes it. Lets a bag change invalidate only the recipes it can affect
+-- instead of wiping every cached craftable count. Rebuilt lazily after a tradeskill scan.
+-- name -> index in atsw_tradeskilllist, so recipe lookups are O(1) instead of a linear
+-- scan. Rebuilt lazily after a tradeskill scan (invalidated in ATSW_CreateTradeSkillList).
+function ATSW_BuildSkillIndex()
+	atsw_skillindex={};
+	for i=1,table.getn(atsw_tradeskilllist),1 do
+		atsw_skillindex[atsw_tradeskilllist[i].name]=i;
+	end
+end
+
+function ATSW_BuildReagentIndex()
+	if(not atsw_skillindex) then ATSW_BuildSkillIndex(); end
+	atsw_itemusers={};
+	for i=1,table.getn(atsw_tradeskilllist),1 do
+		ATSW_IndexClosure(atsw_tradeskilllist[i].name, i, atsw_skillindex, {}, 10);
+	end
+end
+
+function ATSW_IndexClosure(root, listIndex, idx, seen, depth)
+	if(depth<=0) then return; end
+	local reagents=atsw_tradeskilllist[listIndex].reagents;
+	for j=1,table.getn(reagents),1 do
+		local reag=reagents[j].name;
+		if(not atsw_itemusers[reag]) then atsw_itemusers[reag]={}; end
+		atsw_itemusers[reag][root]=true;
+		local ri=idx[reag];
+		if(ri and not seen[reag]) then
+			seen[reag]=true;
+			ATSW_IndexClosure(root, ri, idx, seen, depth-1);
+		end
+	end
+end
+
+-- Invalidate only the cached counts affected by the items that just changed.
+function ATSW_InvalidateChangedCounts()
+	if(atsw_changedall) then
+		ATSW_ResetPossibleItemCounts();
+		return;
+	end
+	if(not atsw_changeditems) then return; end
+	if(not atsw_itemusers) then ATSW_BuildReagentIndex(); end
+	for itemname in pairs(atsw_changeditems) do
+		local users=atsw_itemusers[itemname];
+		if(users) then
+			for recipe in pairs(users) do
+				atsw_tradeskillcountcache[recipe]=nil;
+				atsw_tradeskillcountwithinventorycache[recipe]=nil;
+			end
+		end
+	end
+	atsw_changeditems=nil;
 end
 
 function ATSW_AddJob(skillName,count)
@@ -1979,37 +2058,32 @@ function ATSW_AddJobRecursive(skillName,count,firstcall,depth,previousSkill)
 end
 
 function ATSW_CheckIfPossible(skillName,count,depth,previousSkill)
-	if(depth==nil) then 
+	if(depth==nil) then
 		depth=10;
 	else
 		if(depth<=0) then return; end
 	end
-	for i=1,table.getn(atsw_tradeskilllist),1 do
-		if(atsw_tradeskilllist[i].name==skillName) then
-			for j=1,table.getn(atsw_tradeskilllist[i].reagents),1 do
-				local usagecount=count;
-				for k=1,table.getn(atsw_tradeskilllist),1 do
-					if(atsw_tradeskilllist[k].name==atsw_tradeskilllist[i].reagents[j].name) then
-						usagecount=math.ceil(count/atsw_tradeskilllist[k].num);
-						break;
-					end
-				end
-				local itemcount=ATSW_GetItemCountMinusQueuedAndTemporary(atsw_tradeskilllist[i].reagents[j].name);
-				local necessary=atsw_tradeskilllist[i].reagents[j].count*usagecount;
-				if(itemcount>=necessary) then
-					ATSW_TemporaryUseItem(atsw_tradeskilllist[i].reagents[j].name,necessary);
-				else
-					if(atsw_tradeskilllist[i].reagents[j].name~=previousSkill) then
-						local missing=necessary-itemcount;
-						local response=ATSW_CheckIfPossible(atsw_tradeskilllist[i].reagents[j].name,missing,depth-1,skillName);
-						if(response==false) then return false; end
-					end
-				end
+	if(not atsw_skillindex) then ATSW_BuildSkillIndex(); end
+	local i=atsw_skillindex[skillName];
+	if(not i) then return false; end
+	local recipe=atsw_tradeskilllist[i];
+	for j=1,table.getn(recipe.reagents),1 do
+		local reag=recipe.reagents[j];
+		local k=atsw_skillindex[reag.name];
+		local usagecount=count;
+		if(k) then usagecount=math.ceil(count/atsw_tradeskilllist[k].num); end
+		local itemcount=ATSW_GetItemCountMinusQueuedAndTemporary(reag.name);
+		local necessary=reag.count*usagecount;
+		if(itemcount>=necessary) then
+			ATSW_TemporaryUseItem(reag.name,necessary);
+		else
+			if(reag.name~=previousSkill) then
+				local missing=necessary-itemcount;
+				if(ATSW_CheckIfPossible(reag.name,missing,depth-1,skillName)==false) then return false; end
 			end
-			return true;
 		end
 	end
-	return false;
+	return true;
 end
 
 function ATSW_CheckIfCreatedOnlyWithVendorStuff(skillName,depth,previousSkill)
@@ -2608,15 +2682,18 @@ end
 -- changedBag (BAG_UPDATE's arg1) lets us rescan just that bag and apply the delta to the
 -- aggregate item map instead of rescanning all 5 bags. Falls back to a full rebuild when no
 -- prior snapshot exists or the changed bag isn't a normal backpack/bag (0-4).
-function ATSWInv_UpdateItemList(changedBag)
+function ATSWInv_UpdateItemList(changedBag, skipFrameUpdate)
 	if(atsw_incombat==true) then return; end
 	if(not atsw_itemlist[GetRealmName()]) then
 		atsw_itemlist[GetRealmName()]={};
 	end
 	local agg=atsw_itemlist[GetRealmName()][UnitName("player")];
 	if(changedBag and changedBag>=0 and changedBag<=4 and agg and atsw_baginv[changedBag]) then
-		-- Incremental: subtract the bag's old contents, add its new contents.
+		-- Incremental: subtract the bag's old contents, add its new contents. Record which
+		-- item names this bag touched so the caller can invalidate only the affected recipes.
+		atsw_changeditems=atsw_changeditems or {};
 		for itemname,cnt in pairs(atsw_baginv[changedBag]) do
+			atsw_changeditems[itemname]=true;
 			if(agg[itemname]) then
 				agg[itemname]=agg[itemname]-cnt;
 				if(agg[itemname]<=0) then agg[itemname]=nil; end
@@ -2625,11 +2702,13 @@ function ATSWInv_UpdateItemList(changedBag)
 		local new={};
 		ATSWInv_ScanBag(changedBag,new);
 		for itemname,cnt in pairs(new) do
+			atsw_changeditems[itemname]=true;
 			agg[itemname]=(agg[itemname] or 0)+cnt;
 		end
 		atsw_baginv[changedBag]=new;
 	else
 		-- Full rebuild of the aggregate and every per-bag snapshot.
+		atsw_changedall=true;
 		agg={};
 		atsw_itemlist[GetRealmName()][UnitName("player")]=agg;
 		atsw_baginv={};
@@ -2642,7 +2721,7 @@ function ATSWInv_UpdateItemList(changedBag)
 			end
 		end
 	end
-	if(ATSWFrame:IsVisible()) then ATSWFrame_Update(); end
+	if(not skipFrameUpdate and ATSWFrame:IsVisible()) then ATSWFrame_Update(); end
 end
 
 function ATSWInv_GetItemCount(itemname)
