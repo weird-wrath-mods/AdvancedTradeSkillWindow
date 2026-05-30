@@ -1251,6 +1251,20 @@ function ATSWFrame_UpdateQueue()
 	end
 
 	FauxScrollFrame_Update(ATSWQueueScrollFrame, jobs, 4, 22);
+	-- Rebuild and persist the shopping data on EVERY queue change (including the queue
+	-- emptying as crafts complete), independent of window visibility. ATSW_SaveQueue is
+	-- gated by ATSWFrame:IsVisible(), so on completion the saved vars could stay stale;
+	-- do it unconditionally here, then re-render whichever panel is currently open.
+	ATSW_NoteNecessaryItemsForQueue();
+	if(atsw_displayedgroup and atsw_displayedgroup~="") then
+		local pl=UnitName("player");
+		if(atsw_savedqueue[pl]==nil) then atsw_savedqueue[pl]={}; end
+		atsw_savedqueue[pl][atsw_displayedgroup]=atsw_queue;
+		if(atsw_savednecessaryitems[pl]==nil) then atsw_savednecessaryitems[pl]={}; end
+		atsw_savednecessaryitems[pl][atsw_displayedgroup]=atsw_necessaryitems;
+	end
+	if(ATSWReagentFrame and ATSWReagentFrame:IsVisible()) then ATSW_ShowNecessaryReagents(); end
+	if(ATSWShoppingListFrame and ATSWShoppingListFrame:IsVisible()) then ATSWAuction_UpdateReagentList(); end
 end
 
 function ATSW_DeleteQueue()
