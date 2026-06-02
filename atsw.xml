@@ -186,13 +186,13 @@
 
 	<Frame name="ATSWQueueItemButtonTemplate_Count" hidden="false" virtual="true">
 		<Size>
-			<AbsDimension x="30" y="16"/>
+			<AbsDimension x="40" y="16"/>
 		</Size>
 		<Layers>
 			<Layer level="OVERLAY">
 				<FontString name="$parentText" inherits="GameFontNormal" justifyH="LEFT">
 					<Size>
-						<AbsDimension x="30" y="0"/>
+						<AbsDimension x="40" y="0"/>
 					</Size>
 					<Anchors>
 						<Anchor point="LEFT">
@@ -206,13 +206,13 @@
 
 	<Frame name="ATSWQueueItemButtonTemplate_Name" hidden="false" virtual="true">
 		<Size>
-			<AbsDimension x="280" y="16"/>
+			<AbsDimension x="270" y="16"/>
 		</Size>
 		<Layers>
 			<Layer level="OVERLAY">
 				<FontString name="$parentText" inherits="GameFontNormal" justifyH="LEFT">
 					<Size>
-						<AbsDimension x="280" y="0"/>
+						<AbsDimension x="270" y="0"/>
 					</Size>
 					<Anchors>
 						<Anchor point="LEFT">
@@ -242,7 +242,7 @@
 				<Anchors>
 					<Anchor point="LEFT">
 						<Offset>
-							<AbsDimension x="34" y="0"/>
+							<AbsDimension x="44" y="0"/>
 						</Offset>
 					</Anchor>
 				</Anchors>
@@ -403,7 +403,7 @@
     	</Scripts>
     </Frame>
 
-	<Frame name="ATSWFrame" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
+	<Frame name="ATSWFrame" toplevel="true" frameStrata="HIGH" enableMouse="true" movable="true" parent="UIParent" hidden="true">
 		<TitleRegion setAllPoints="true"/>
         <Size>
             <AbsDimension x="768" y="512"/>
@@ -2370,7 +2370,7 @@
         </NormalText>
     </Button>
 
-	<Frame name="ATSWReagentFrame" frameStrata="MEDIUM" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
+	<Frame name="ATSWReagentFrame" frameStrata="HIGH" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
         <Size>
             <AbsDimension x="512" y="512"/>
         </Size>

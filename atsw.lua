@@ -39,6 +39,8 @@ local atsw_tradeskillcountcache={};
 local atsw_tradeskillcountwithinventorycache={};
 atsw_selectedskill="";
 local atsw_displayedgroup="";
+local atsw_displayedrank=0; -- last scanned skill rank; a change means difficulties shifted
+local atsw_displayednumskills=0; -- last scanned recipe count; a change means a recipe was learned/lost
 local atsw_retries=0;
 local atsw_retrydelay=0;
 local atsw_retry=false;
@@ -64,6 +66,12 @@ atsw_queue={};
 local atsw_preventupdate=false;
 local atsw_iscurrentlyenabled=false;
 local atsw_processingname="";
+-- Reference to the exact job object (and the queue table it lives in) that the
+-- current DoTradeSkill batch is crafting. Decrements target these directly instead
+-- of name-searching the live atsw_queue, which can be swapped to another group's
+-- table mid-batch (see ATSW_CheckForRescan) and break the per-craft countdown.
+local atsw_processingjob=nil;
+local atsw_processingqueue=nil;
 local atsw_processing=false;
 local atsw_processnext=false;
 local atsw_lastremoved="";
@@ -310,6 +318,19 @@ function ATSW_CheckForTradeSkillWindow(arg1)
 				atsw_updatedelay=0;
 			end
 		end
+		-- A prior scan saw incomplete reagent data; rebuild now that the cache has had a
+		-- moment to warm, then refresh counts. ATSW_CreateTradeSkillList re-arms or clears
+		-- the pending flag based on whether this pass resolved everything.
+		if(atsw_reagentrescanpending) then
+			atsw_reagentrescandelay=atsw_reagentrescandelay-arg1;
+			if(atsw_reagentrescandelay<=0) then
+				atsw_reagentrescanpending=false;
+				atsw_reagentscanretries=(atsw_reagentscanretries or 0)+1;
+				ATSW_CreateTradeSkillList();
+				ATSW_ResetPossibleItemCounts();
+				ATSWFrame_Update();
+			end
+		end
 		ATSW_CheckForRescan();
 	end
 	atsw_crafttimeaccum=(atsw_crafttimeaccum or 0)+arg1;
@@ -336,6 +357,8 @@ function ATSW_CheckForTradeSkillWindow(arg1)
 				atsw_processingtimeout=atsw_processingtimeout-arg1;
 			else
 				atsw_processingtimeout=0;
+				atsw_processingjob=nil;
+				atsw_processingqueue=nil;
 				ATSWQueueStartStopButton:Enable();
 				ATSWQueueDeleteButton:Enable();
 				ATSWQueueStartStopButton:SetText(ATSW_STARTQUEUE);
@@ -478,6 +501,23 @@ function ATSWFrame_OnEvent()
 			atsw_bagdirtydelay=0.15;
 		end
 	end
+	-- Craft-completion events drive the queue countdown and are only registered while
+	-- a queue is actively processing. Handle them BEFORE the visibility gate below:
+	-- that early-return is for passive UI-refresh events, and gating craft accounting
+	-- on window visibility silently drops every decrement in a batch if the ATSW frame
+	-- is hidden mid-craft (e.g. displaced by another ShowUIPanel frame) while the
+	-- underlying trade-skill keeps crafting. That is the "queue didn't count down at
+	-- all" bug. The Spellcast* handlers self-guard on atsw_processing/atsw_processingjob.
+	if(event=="UNIT_SPELLCAST_STOP" or event=="UNIT_SPELLCAST_CHANNEL_STOP") then
+		if(arg1=="player") then ATSW_SpellcastStop(); end
+		return;
+	elseif(event=="UNIT_SPELLCAST_START") then
+		if(arg1=="player") then ATSW_SpellcastStart(); end
+		return;
+	elseif(event=="UNIT_SPELLCAST_INTERRUPTED") then
+		if(arg1=="player") then ATSW_SpellcastInterrupted(); end
+		return;
+	end
 	if(not ATSWFrame:IsVisible()) then
 		return;
 	end
@@ -486,6 +526,18 @@ function ATSWFrame_OnEvent()
 	end
 	if(event=="TRADE_SKILL_UPDATE") then
 		--ATSW_DisplayMessage(GetTime().."TRADE_SKILL_UPDATE");
+		-- A skill-up shifts recipe difficulty colors (orange->yellow->green->grey);
+		-- learning/losing a recipe shifts every trade-skill index. The atsw_scans<2
+		-- limiter would otherwise suppress the rescan, leaving the cached difficulties
+		-- and the sorted-by-difficulty index array (atsw_tradeskillid) stale. Force a
+		-- fresh scan when the rank or the recipe count changes.
+		local _, currentrank = GetTradeSkillLine();
+		local currentnumskills = GetNumTradeSkills();
+		if((currentrank and currentrank~=atsw_displayedrank) or currentnumskills~=atsw_displayednumskills) then
+			atsw_displayedrank=currentrank or atsw_displayedrank;
+			atsw_displayednumskills=currentnumskills;
+			atsw_scans=0;
+		end
 		if(atsw_scans<2) then
 			atsw_scans=atsw_scans+1;
 			ATSW_CreateTradeSkillList();
@@ -515,12 +567,6 @@ function ATSWFrame_OnEvent()
 		end
 	elseif(event=="UPDATE_TRADESKILL_RECAST") then
 		ATSWInputBox:SetNumber(GetTradeskillRepeatCount());
-	elseif(event=="UNIT_SPELLCAST_STOP" or event=="UNIT_SPELLCAST_CHANNEL_STOP") then
-		if(arg1=="player") then ATSW_SpellcastStop(); end
-	elseif(event=="UNIT_SPELLCAST_START") then
-		if(arg1=="player") then	ATSW_SpellcastStart(); end
-	elseif(event=="UNIT_SPELLCAST_INTERRUPTED") then
-		if(arg1=="player") then ATSW_SpellcastInterrupted(); end
 	elseif(event=="TRAINER_CLOSED") then
 		ATSW_ResetPossibleItemCounts();
 		ATSW_CreateSkillListing();
@@ -943,7 +989,12 @@ function ATSWFrame_SetSelection(id,wasClicked)
 	if(GetTradeSkillSelectionIndex()>GetNumTradeSkills())then
 		return;
 	end
-	local color=ATSWTypeColor[skillType];
+	-- Read the difficulty live rather than from atsw_skilllisting[].type: the
+	-- difficulty-sorted list colors its rows from GetTradeSkillInfo (live), so a
+	-- stale cached type here would tint the selection background a different color
+	-- than the row text (e.g. green/grey bg under a yellow recipe).
+	local _, liveSkillType = GetTradeSkillInfo(GetTradeSkillSelectionIndex());
+	local color=ATSWTypeColor[liveSkillType] or ATSWTypeColor[skillType];
 	if(color) then
 		ATSWHighlight:SetVertexColor(color.r, color.g, color.b);
 	end
@@ -1357,6 +1408,8 @@ end
 
 function ATSW_DeleteQueue()
 	atsw_queue={};
+	atsw_processingjob=nil;
+	atsw_processingqueue=nil;
 	ATSW_ResetPossibleItemCounts();
 	ATSWInv_UpdateQueuedItemList();
 	ATSWFrame_UpdateQueue();
@@ -1481,6 +1534,26 @@ function ATSW_AddJobFirst(skillname, num)
 	end
 end
 
+-- Decrement a specific job OBJECT inside a specific queue table, independent of
+-- whatever atsw_queue currently points at. The processor uses this so an in-flight
+-- batch always counts down the recipe it is actually crafting, even if the displayed
+-- group (and thus atsw_queue) was swapped out from under it mid-batch.
+function ATSW_DecrementJob(queue, job, num)
+	if(not queue or not job) then return; end
+	job.count=job.count-num;
+	if(job.count<=0) then
+		for i=1,table.getn(queue),1 do
+			if(queue[i]==job) then
+				table.remove(queue,i);
+				if(queue==atsw_queue and FauxScrollFrame_GetOffset(ATSWQueueScrollFrame)>0 and FauxScrollFrame_GetOffset(ATSWQueueScrollFrame)+4>table.getn(atsw_queue)) then
+					FauxScrollFrame_SetOffset(ATSWQueueScrollFrame,FauxScrollFrame_GetOffset(ATSWQueueScrollFrame)-1);
+				end
+				break;
+			end
+		end
+	end
+end
+
 function ATSW_DeleteJobPartial(skillname, num)
 	for i=1,table.getn(atsw_queue),1 do
 		if(atsw_queue[i].name==skillname) then
@@ -1499,8 +1572,14 @@ end
 
 function ATSW_StartStopProcessing()
 	if(atsw_processing==true) then
-		ATSW_AddJobFirst(atsw_processingname,1);
+		-- Do NOT re-add a craft here. Decrement happens on craft completion
+		-- (UNIT_SPELLCAST_STOP), so the in-flight craft (if any) still completes and
+		-- counts itself down; adding one back double-counts it. This bogus +1 was the
+		-- source of the queue growing by one each time it was stopped and restarted
+		-- (e.g. after running out of a reagent).
 		atsw_processing=false;
+		atsw_processingjob=nil;
+		atsw_processingqueue=nil;
 		ATSWQueueStartStopButton:Enable();
 		ATSWQueueDeleteButton:Enable();
 		ATSWQueueStartStopButton:SetText(ATSW_STARTQUEUE);
@@ -1561,6 +1640,8 @@ end
 
 function ATSW_ProcessIt()
 	atsw_processingname=atsw_queue[1].name;
+	atsw_processingjob=atsw_queue[1];   -- the job object this batch is crafting
+	atsw_processingqueue=atsw_queue;    -- the group's queue table that job belongs to
 	atsw_working=true;
 	atsw_retries=atsw_retries+1;
 	atsw_retry=true;
@@ -1577,16 +1658,24 @@ function ATSW_SpellcastStop()
 		if(dur>0.2 and dur<60) then atsw_crafttimes[atsw_castingname]=dur; end
 		atsw_caststarttime=nil;
 	end
-	if(atsw_queue[1]) then
+	if(atsw_processingjob) then
 		atsw_lastremoved=atsw_processingname;
-		ATSW_DeleteJobPartial(atsw_processingname,1);
+		ATSW_DecrementJob(atsw_processingqueue,atsw_processingjob,1);
+		if(atsw_processingjob.count<=0) then atsw_processingjob=nil; end
+		ATSW_ResetPossibleItemCounts();
+		ATSWInv_UpdateQueuedItemList();
 		ATSWFrame_UpdateQueue();
+		ATSWFrame_Update();
 	end
-	if(atsw_processing==true) then 
-		if(atsw_queue[1]~=nil and atsw_queue[1].name~=atsw_processingname) then
+	if(atsw_processing==true) then
+		-- Advance only once the current recipe's batch has fully drained (job cleared
+		-- above), and only if something remains in the live queue to craft next.
+		if(atsw_processingjob==nil and atsw_queue[1]~=nil) then
 			atsw_processnext=true;
 		end
-	else	
+	else
+		atsw_processingjob=nil;
+		atsw_processingqueue=nil;
 		ATSWQueueStartStopButton:Enable();
 		ATSWQueueStartStopButton:SetText(ATSW_STARTQUEUE);
 		ATSWQueueDeleteButton:Enable();
@@ -1615,6 +1704,8 @@ function ATSW_SpellcastInterrupted()
 		ATSWQueueStartStopButton:SetText(ATSW_STARTQUEUE);
 		atsw_processing=false;
 		atsw_interrupted=true;
+		atsw_processingjob=nil;
+		atsw_processingqueue=nil;
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_STOP");
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_START");
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_CHANNEL_STOP");
@@ -1676,6 +1767,8 @@ function ATSW_CreateTradeSkillList()
 	atsw_tradeskillheaders={};
 	atsw_itemusers=nil; -- reagent index is stale once the recipe list changes; rebuild lazily
 	atsw_skillindex=nil; -- name->index map likewise
+	atsw_is_sorted=false; -- difficulties may have shifted (skill-up); force a re-sort
+	atsw_scanwasincomplete=false; -- set true below if any recipe's reagents didn't fully resolve
 
 	--if(atsw_oldmode) then 
 	--	table.insert(atsw_tradeskillheaders,{name="invisibleheader",id=0,list={},expanded=true});
@@ -1704,15 +1797,24 @@ function ATSW_CreateTradeSkillList()
 					local minMade, maxMade = GetTradeSkillNumMade(i);
 					local numMade = minMade;
 					if(maxMade and maxMade>minMade) then numMade = (minMade+maxMade)/2; end
+					local resolved=0;
 					for j=1, numReagents, 1 do
 						local reagentName, reagentTexture, reagentCount, playerReagentCount = GetTradeSkillReagentInfo(i, j);
 						local reagentLink = GetTradeSkillReagentItemLink(i,j);
 						if(reagentName) then
 							table.insert(reagentlist,{name=reagentName,count=reagentCount,link=reagentLink});
+							resolved=resolved+1;
 						end
 					end
+					-- If the server/client hasn't cached this recipe's reagent data yet (common on the
+					-- fast prescanned path with a cold item cache), some reagents resolve to nil and get
+					-- skipped above. Stored as-is the recipe looks reagent-less, which reads as infinitely
+					-- craftable (the bogus "500" cap). Flag it so the count code refuses it and a rescan
+					-- below rebuilds once the cache warms.
+					local incomplete=(resolved<numReagents);
+					if(incomplete) then atsw_scanwasincomplete=true; end
 					local recipeLink=GetTradeSkillRecipeLink(i);
-					table.insert(atsw_tradeskilllist,{name=skillName,id=i,reagents=reagentlist,link=skillLink,type=skillType,num=numMade,recipelink=recipeLink});
+					table.insert(atsw_tradeskilllist,{name=skillName,id=i,reagents=reagentlist,numreagents=numReagents,incomplete=incomplete,link=skillLink,type=skillType,num=numMade,recipelink=recipeLink});
 					table.insert(atsw_tradeskillheaders[currentHeader].list,table.getn(atsw_tradeskilllist));
 				end
 			end
@@ -1749,6 +1851,18 @@ function ATSW_CreateTradeSkillList()
 
 	if(check==false) then
 		ATSW_CreateSkillListing();
+	end
+
+	-- Recipes scanned with cold reagent data are flagged incomplete above. The fast
+	-- (prescanned) path does no further scan on its own, so schedule a bounded rebuild
+	-- here: by the time it fires the item cache is warm and reagents/counts resolve for
+	-- real. Capped so a recipe whose data never arrives can't loop forever.
+	if(atsw_scanwasincomplete and (atsw_reagentscanretries or 0)<5) then
+		atsw_reagentrescanpending=true;
+		atsw_reagentrescandelay=0.3;
+	else
+		atsw_reagentrescanpending=false;
+		if(not atsw_scanwasincomplete) then atsw_reagentscanretries=0; end
 	end
 end
 
@@ -2067,6 +2181,10 @@ function ATSW_CheckIfPossible(skillName,count,depth,previousSkill)
 	local i=atsw_skillindex[skillName];
 	if(not i) then return false; end
 	local recipe=atsw_tradeskilllist[i];
+	-- Reagents not yet resolved (cold cache) leave an empty list; iterating zero reagents
+	-- below would return true for any count, so the caller's binary search runs to its 500
+	-- cap. Treat unknown reagents as not-yet-makeable; the deferred rescan fixes the count.
+	if(recipe.incomplete or table.getn(recipe.reagents)==0) then return false; end
 	for j=1,table.getn(recipe.reagents),1 do
 		local reag=recipe.reagents[j];
 		local k=atsw_skillindex[reag.name];
