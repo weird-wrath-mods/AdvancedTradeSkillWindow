@@ -52,11 +52,7 @@ local atsw_updatedelay=0;
 local atsw_uncategorizedexpanded=true;
 local atsw_tradeskillid={};
 local atsw_currentinvslotfilter={};
-local atsw_invslotfilter={};
-local atsw_invslotfiltered={};
 local atsw_currentsubclassfilter={};
-local atsw_subclassfilter={};
-local atsw_subclassfiltered={};
 local atsw_updating=false;
 local atsw_incombat=false;
 local atsw_bankopened=false;
@@ -134,8 +130,6 @@ function ATSW_ShowWindow()
 	--end
 	atsw_oldtradeskillcount=0;
 	atsw_is_sorted=false;
-	if(atsw_subclassfiltered[atsw_selectedskill]==nil) then atsw_subclassfiltered[atsw_selectedskill]={}; end
-	if(atsw_invslotfiltered[atsw_selectedskill]==nil) then atsw_invslotfiltered[atsw_selectedskill]={}; end
 	ShowUIPanel(ATSWCheckerFrame);
 	ShowUIPanel(ATSWFrame);
 	SetPortraitTexture(ATSWFramePortrait, "player");
@@ -1215,56 +1209,42 @@ function ATSWFilterFrame_LoadInvSlots(...)
 	end
 end
 
+-- Filtering is purely a display concern now: record the selected dropdown index (0 = All,
+-- otherwise the 1-based index into GetTradeSkillSubClasses/InvSlots) and re-list. We never call
+-- SetTradeSkill*Filter, so the Blizzard recipe set -- and our master list -- stays complete.
 function ATSWSubClassDropDownButton_OnClick(self)
 	UIDropDownMenu_SetSelectedID(ATSWSubClassDropDown, self:GetID());
-	if(self:GetID()==1) then
-		atsw_subclassfilter[atsw_selectedskill]=nil;
-		atsw_subclassfiltered[atsw_selectedskill]={};
-		atsw_currentsubclassfilter[atsw_selectedskill]=0;
-		ATSW_CreateSkillListing();
-		ATSWFrame_Update();
-	else
-		atsw_subclassfilter[atsw_selectedskill]=self:GetID()-1;
-		atsw_currentsubclassfilter[atsw_selectedskill]=atsw_subclassfilter[atsw_selectedskill];
-		SetTradeSkillSubClassFilter(self:GetID() - 1, 1, 1);
-	end
+	atsw_currentsubclassfilter[atsw_selectedskill]=self:GetID()-1;
+	ATSW_CreateSkillListing();
+	ATSWFrame_Update();
 end
 
 function ATSWInvSlotDropDownButton_OnClick(self)
 	UIDropDownMenu_SetSelectedID(ATSWInvSlotDropDown, self:GetID());
-	if(self:GetID()==1) then
-		atsw_invslotfilter[atsw_selectedskill]=nil;
-		atsw_invslotfiltered[atsw_selectedskill]={};
-		atsw_currentinvslotfilter[atsw_selectedskill]=0;
-		ATSW_CreateSkillListing();
-		ATSWFrame_Update();
-	else
-		atsw_invslotfilter[atsw_selectedskill]=self:GetID()-1;
-		atsw_currentinvslotfilter[atsw_selectedskill]=atsw_invslotfilter[atsw_selectedskill];
-		SetTradeSkillInvSlotFilter(self:GetID() - 1, 1, 1);
-	end
+	atsw_currentinvslotfilter[atsw_selectedskill]=self:GetID()-1;
+	ATSW_CreateSkillListing();
+	ATSWFrame_Update();
 end
 
+-- Pure-Lua display filters: compare the recipe's classified index (set during the scan
+-- from its crafted item) against the selected dropdown index. 0/nil selection = show all.
+-- Headers and recipes we couldn't classify (item-less/uncached) only pass when "All".
 function ATSW_FilterInvSlot(skillName)
-	if(atsw_currentinvslotfilter[atsw_selectedskill]==0 or atsw_currentinvslotfilter[atsw_selectedskill]==nil) then 
-		return true; 
-	end
-	if(atsw_invslotfiltered[atsw_selectedskill][skillName]) then 
-		return true;
-	else
-		return false;
-	end	
+	local sel=atsw_currentinvslotfilter[atsw_selectedskill];
+	if(sel==nil or sel==0) then return true; end
+	if(not atsw_skillindex) then ATSW_BuildSkillIndex(); end
+	local i=atsw_skillindex[skillName];
+	if(not i) then return false; end
+	return atsw_tradeskilllist[i].invslotindex==sel;
 end
 
 function ATSW_FilterSubClass(skillName)
-	if(atsw_currentsubclassfilter[atsw_selectedskill]==0 or atsw_currentsubclassfilter[atsw_selectedskill]==nil) then 
-		return true; 
-	end
-	if(atsw_subclassfiltered[atsw_selectedskill][skillName]) then 
-		return true;
-	else
-		return false;
-	end	
+	local sel=atsw_currentsubclassfilter[atsw_selectedskill];
+	if(sel==nil or sel==0) then return true; end
+	if(not atsw_skillindex) then ATSW_BuildSkillIndex(); end
+	local i=atsw_skillindex[skillName];
+	if(not i) then return false; end
+	return atsw_tradeskilllist[i].subclassindex==sel;
 end
 
 function ATSWCollapseAllButton_OnClick()
@@ -1770,6 +1750,16 @@ function ATSW_CreateTradeSkillList()
 	atsw_is_sorted=false; -- difficulties may have shifted (skill-up); force a re-sort
 	atsw_scanwasincomplete=false; -- set true below if any recipe's reagents didn't fully resolve
 
+	-- Name->index maps for the subclass / inv-slot filter dropdowns (same lists the dropdowns
+	-- are built from). Each recipe is classified against these by its crafted item below, so
+	-- filtering is a pure-Lua comparison and never touches Blizzard's SetTradeSkill*Filter.
+	local subclassByName={};
+	local subclassList={GetTradeSkillSubClasses()};
+	for idx=1,table.getn(subclassList),1 do subclassByName[subclassList[idx]]=idx; end
+	local invslotByName={};
+	local invslotList={GetTradeSkillInvSlots()};
+	for idx=1,table.getn(invslotList),1 do invslotByName[invslotList[idx]]=idx; end
+
 	--if(atsw_oldmode) then 
 	--	table.insert(atsw_tradeskillheaders,{name="invisibleheader",id=0,list={},expanded=true});
 	--	currentHeader=1;
@@ -1813,45 +1803,33 @@ function ATSW_CreateTradeSkillList()
 					-- below rebuilds once the cache warms.
 					local incomplete=(resolved<numReagents);
 					if(incomplete) then atsw_scanwasincomplete=true; end
+					-- Classify by the crafted item's subclass + equip slot so the filters are pure
+					-- display filters. Item-less recipes (enchants) leave these nil (match only "All");
+					-- a cold-cache GetItemInfo also leaves them nil and flags incomplete for a rescan.
+					local subclassindex,invslotindex;
+					if(skillLink) then
+						local _,_,_,_,_,_,itemSubType,_,itemEquipLoc=GetItemInfo(skillLink);
+						if(itemSubType) then
+							subclassindex=subclassByName[itemSubType];
+						elseif(not incomplete) then
+							incomplete=true; atsw_scanwasincomplete=true; -- crafted item not cached yet
+						end
+						if(itemEquipLoc and itemEquipLoc~="" and getglobal(itemEquipLoc)) then
+							invslotindex=invslotByName[getglobal(itemEquipLoc)];
+						end
+					end
 					local recipeLink=GetTradeSkillRecipeLink(i);
-					table.insert(atsw_tradeskilllist,{name=skillName,id=i,reagents=reagentlist,numreagents=numReagents,incomplete=incomplete,link=skillLink,type=skillType,num=numMade,recipelink=recipeLink});
+					table.insert(atsw_tradeskilllist,{name=skillName,id=i,reagents=reagentlist,numreagents=numReagents,incomplete=incomplete,subclassindex=subclassindex,invslotindex=invslotindex,link=skillLink,type=skillType,num=numMade,recipelink=recipeLink});
 					table.insert(atsw_tradeskillheaders[currentHeader].list,table.getn(atsw_tradeskilllist));
 				end
 			end
 		end
 	end
 
-	local check=false;
-
-	if(atsw_invslotfilter[atsw_selectedskill]~=nil) then
-		atsw_invslotfilter[atsw_selectedskill]=nil;
-		atsw_invslotfiltered[atsw_selectedskill]={};
-		for i=1,table.getn(atsw_tradeskilllist),1 do
-			atsw_invslotfiltered[atsw_selectedskill][atsw_tradeskilllist[i].name]=1;
-		end
-		for i=1,table.getn(atsw_tradeskillheaders),1 do
-			atsw_invslotfiltered[atsw_selectedskill][atsw_tradeskillheaders[i].name]=1;
-		end
-		SetTradeSkillInvSlotFilter(0, 1, 1);
-		check=true;
-	end
-
-	if(atsw_subclassfilter[atsw_selectedskill]~=nil) then
-		atsw_subclassfilter[atsw_selectedskill]=nil;
-		atsw_subclassfiltered[atsw_selectedskill]={};
-		for i=1,table.getn(atsw_tradeskilllist),1 do
-			atsw_subclassfiltered[atsw_selectedskill][atsw_tradeskilllist[i].name]=1;
-		end
-		for i=1,table.getn(atsw_tradeskillheaders),1 do
-			atsw_subclassfiltered[atsw_selectedskill][atsw_tradeskillheaders[i].name]=1;
-		end
-		SetTradeSkillSubClassFilter(0, 1, 1);
-		check=true;
-	end
-
-	if(check==false) then
-		ATSW_CreateSkillListing();
-	end
+	-- Recipes are classified by crafted item during the scan above (subclassindex/invslotindex)
+	-- and filtered purely in ATSW_FilterSubClass/InvSlot, so there's no longer any Blizzard-filter
+	-- handshake here -- the master list is always the complete set.
+	ATSW_CreateSkillListing();
 
 	-- Recipes scanned with cold reagent data are flagged incomplete above. The fast
 	-- (prescanned) path does no further scan on its own, so schedule a bounded rebuild
