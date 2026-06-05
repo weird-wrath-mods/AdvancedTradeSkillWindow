@@ -188,7 +188,11 @@ end
 
 function ATSW_CheckForRescan()
 	skillname=GetTradeSkillLine();
-	if(skillname) then
+	-- GetTradeSkillLine() returns "UNKNOWN" (and transiently nil/"") while the window is
+	-- opening, before the server delivers skill data. Binding atsw_displayedgroup to those
+	-- placeholders files the queue/shopping data under a phantom group key that normal play
+	-- never revisits, so it never clears. Only bind a real profession name.
+	if(skillname and skillname~="" and skillname~="UNKNOWN") then
 		if(skillname~=atsw_displayedgroup) then
 			-- Reset the scan limiter only on an actual profession change. Doing it every
 			-- frame (as before) defeated the atsw_scans<2 guard, so every TRADE_SKILL_UPDATE
@@ -344,6 +348,14 @@ function ATSW_CheckForTradeSkillWindow(arg1)
 	if(atsw_processnext==true) then
 		atsw_processnext=false;
 		ATSW_ProcessNextQueueItem();
+	end
+	if(atsw_recraft==true) then
+		atsw_recraft=false;
+		-- Re-validate at fire time: only re-craft if still processing the same head job (an
+		-- interrupt/stop/delete since the flag was set must not trigger a stray craft).
+		if(atsw_processing==true and atsw_processingjob and atsw_queue[1]==atsw_processingjob) then
+			ATSW_ProcessIt();
+		end
 	end
 	if(atsw_processing==true) then
 		if(atsw_processingtimeout~=0) then
@@ -1400,7 +1412,10 @@ function ATSW_DeleteQueue()
 end
 
 function ATSW_SaveQueue(delete)
-	if(ATSWFrame:IsVisible()) then
+	-- Mirror ATSWFrame_UpdateQueue's guard: never persist under a phantom group key. This
+	-- runs from ATSW_HideWindow (TRADE_SKILL_CLOSE) and PLAYER_LOGOUT, which can fire during
+	-- the open/close transition while atsw_displayedgroup is still "" or "UNKNOWN".
+	if(ATSWFrame:IsVisible() and atsw_displayedgroup and atsw_displayedgroup~="" and atsw_displayedgroup~="UNKNOWN") then
 		ATSW_NoteNecessaryItemsForQueue();
 		if(atsw_savedqueue[UnitName("player")]==nil) then
 			atsw_savedqueue[UnitName("player")]={};
@@ -1622,6 +1637,7 @@ function ATSW_ProcessIt()
 	atsw_processingname=atsw_queue[1].name;
 	atsw_processingjob=atsw_queue[1];   -- the job object this batch is crafting
 	atsw_processingqueue=atsw_queue;    -- the group's queue table that job belongs to
+	atsw_processingbatch=atsw_queue[1].count; -- crafts this DoTradeSkill batch will perform
 	atsw_working=true;
 	atsw_retries=atsw_retries+1;
 	atsw_retry=true;
@@ -1641,6 +1657,7 @@ function ATSW_SpellcastStop()
 	if(atsw_processingjob) then
 		atsw_lastremoved=atsw_processingname;
 		ATSW_DecrementJob(atsw_processingqueue,atsw_processingjob,1);
+		if(atsw_processingbatch) then atsw_processingbatch=atsw_processingbatch-1; end
 		if(atsw_processingjob.count<=0) then atsw_processingjob=nil; end
 		ATSW_ResetPossibleItemCounts();
 		ATSWInv_UpdateQueuedItemList();
@@ -1652,6 +1669,11 @@ function ATSW_SpellcastStop()
 		-- above), and only if something remains in the live queue to craft next.
 		if(atsw_processingjob==nil and atsw_queue[1]~=nil) then
 			atsw_processnext=true;
+		elseif(atsw_processingjob~=nil and atsw_processingbatch and atsw_processingbatch<=0 and atsw_queue[1]==atsw_processingjob) then
+			-- The in-flight DoTradeSkill batch is exhausted but this job still has count: more
+			-- of the same recipe was queued (e.g. hitting Create again) after DoTradeSkill was
+			-- issued for the old count. Re-craft the remainder instead of freezing the queue.
+			atsw_recraft=true;
 		end
 	else
 		atsw_processingjob=nil;
@@ -2169,6 +2191,13 @@ function ATSW_CheckIfPossible(skillName,count,depth,previousSkill)
 		local usagecount=count;
 		if(k) then usagecount=math.ceil(count/atsw_tradeskilllist[k].num); end
 		local itemcount=ATSW_GetItemCountMinusQueuedAndTemporary(reag.name);
+		-- Queued jobs reserve their intermediate PRODUCTS (e.g. Bolt of Frostweave) in
+		-- atsw_queueditemlist even though none are in inventory yet, so the count goes
+		-- negative. Without clamping, missing=necessary-itemcount below re-adds that
+		-- negative as extra demand, double-counting the queued job down every intermediate
+		-- level and collapsing the makeable count. ATSW_AddJobRecursive already clamps;
+		-- match it here so the makeable count stays correct after queueing.
+		if(itemcount<0) then itemcount=0; end
 		local necessary=reag.count*usagecount;
 		if(itemcount>=necessary) then
 			ATSW_TemporaryUseItem(reag.name,necessary);
@@ -2213,6 +2242,7 @@ function ATSW_NoteMissingItems(skillName,count,depth,previousSkill)
 			if(atsw_tradeskilllist[i].name==skillName) then
 				for j=1,table.getn(atsw_tradeskilllist[i].reagents),1 do
 					local itemcount=ATSW_GetItemCountMinusQueuedAndTemporary(atsw_tradeskilllist[i].reagents[j].name);
+					if(itemcount<0) then itemcount=0; end -- see ATSW_CheckIfPossible: clamp queued-intermediate over-reservation
 					local necessary=atsw_tradeskilllist[i].reagents[j].count*count;
 					if(itemcount>=necessary) then
 						ATSW_TemporaryUseItem(atsw_tradeskilllist[i].reagents[j].name,necessary);
@@ -3080,8 +3110,13 @@ function ATSWAuction_UpdateReagentList()
 		for charname, skillarrays in pairs(atsw_savednecessaryitems) do
 			if(skillarrays) then
 				for skillname, necessaryitems in pairs(skillarrays) do
-					for k, v in pairs(necessaryitems) do
-						table.insert(necessary, {name=v.name,count=v.cnt,link=v.link});
+					-- Skip phantom group keys left by older builds (or any future leak): they
+					-- duplicate reagents that normal play never clears. Real profession groups
+					-- are never named "" or "UNKNOWN", so this can't hide legitimate needs.
+					if(skillname~="" and skillname~="UNKNOWN") then
+						for k, v in pairs(necessaryitems) do
+							table.insert(necessary, {name=v.name,count=v.cnt,link=v.link});
+						end
 					end
 				end
 			end
