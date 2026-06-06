@@ -403,7 +403,7 @@
     	</Scripts>
     </Frame>
 
-	<Frame name="ATSWFrame" toplevel="true" frameStrata="HIGH" enableMouse="true" movable="true" parent="UIParent" hidden="true">
+	<Frame name="ATSWFrame" toplevel="true" frameStrata="MEDIUM" enableMouse="true" movable="true" parent="UIParent" hidden="true">
 		<TitleRegion setAllPoints="true"/>
         <Size>
             <AbsDimension x="768" y="512"/>
@@ -2370,7 +2370,7 @@
         </NormalText>
     </Button>
 
-	<Frame name="ATSWReagentFrame" frameStrata="HIGH" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
+	<Frame name="ATSWReagentFrame" frameStrata="MEDIUM" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
         <Size>
             <AbsDimension x="512" y="512"/>
         </Size>
@@ -3916,7 +3916,7 @@
 		</Frames>
 	</Frame>
 
-	<Frame name="ATSWShoppingListFrame" frameStrata="HIGH" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
+	<Frame name="ATSWShoppingListFrame" frameStrata="MEDIUM" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
         <Size>
             <AbsDimension x="512" y="200"/>
         </Size>
@@ -4190,7 +4190,7 @@
 		</Frames>
 	</Frame>
 
-	<Frame name="ATSWAllReagentListFrame" frameStrata="HIGH" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
+	<Frame name="ATSWAllReagentListFrame" frameStrata="MEDIUM" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
 		<TitleRegion setAllPoints="true"/>
         <Size>
             <AbsDimension x="512" y="256"/>
