@@ -180,7 +180,7 @@
 		</Frames>
     </Frame>
 
-	<Frame name="ATSWCSFrame" toplevel="true" enableMouse="true" movable="true" parent="UIParent" hidden="true">
+	<Frame name="ATSWCSFrame" toplevel="true" frameStrata="HIGH" enableMouse="true" movable="true" parent="UIParent" hidden="true">
 		<TitleRegion setAllPoints="true"/>
         <Size>
             <AbsDimension x="768" y="512"/>
