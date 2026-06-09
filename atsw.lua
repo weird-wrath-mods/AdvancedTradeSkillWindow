@@ -373,6 +373,8 @@ function ATSW_CheckForTradeSkillWindow(arg1)
 				ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_CHANNEL_STOP");
 				ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_START");
 				ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_INTERRUPTED");
+				ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_FAILED");
+				ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_FAILED_QUIET");
 			end
 		end
 		if(atsw_retry==true) then
@@ -521,6 +523,13 @@ function ATSWFrame_OnEvent()
 		if(arg1=="player") then ATSW_SpellcastStart(); end
 		return;
 	elseif(event=="UNIT_SPELLCAST_INTERRUPTED") then
+		if(arg1=="player") then ATSW_SpellcastInterrupted(); end
+		return;
+	elseif(event=="UNIT_SPELLCAST_FAILED" or event=="UNIT_SPELLCAST_FAILED_QUIET") then
+		-- Self-cancels (moving/jumping/Esc mid-cast) fire FAILED, not STOP/INTERRUPTED.
+		-- Without this the processing state machine never tears down and the Process Queue
+		-- button stays frozen on a stale countdown. ATSW_SpellcastInterrupted self-guards
+		-- on atsw_processing, so a stray FAILED outside a queue run is a no-op.
 		if(arg1=="player") then ATSW_SpellcastInterrupted(); end
 		return;
 	end
@@ -1608,7 +1617,9 @@ function ATSW_StartProcessing()
 	ATSWFrame:RegisterEvent("UNIT_SPELLCAST_START");
 	ATSWFrame:RegisterEvent("UNIT_SPELLCAST_CHANNEL_STOP");
 	ATSWFrame:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED");
-	ATSW_ProcessNextQueueItem(true);	
+	ATSWFrame:RegisterEvent("UNIT_SPELLCAST_FAILED");
+	ATSWFrame:RegisterEvent("UNIT_SPELLCAST_FAILED_QUIET");
+	ATSW_ProcessNextQueueItem(true);
 end
 
 function ATSW_ProcessNextQueueItem(directClick)
@@ -1685,6 +1696,8 @@ function ATSW_SpellcastStop()
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_START");
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_CHANNEL_STOP");
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_INTERRUPTED");
+		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_FAILED");
+		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_FAILED_QUIET");
 	end
 end
 
@@ -1712,6 +1725,8 @@ function ATSW_SpellcastInterrupted()
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_START");
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_CHANNEL_STOP");
 		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_INTERRUPTED");
+		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_FAILED");
+		ATSWFrame:UnregisterEvent("UNIT_SPELLCAST_FAILED_QUIET");
 	end
 end
 
