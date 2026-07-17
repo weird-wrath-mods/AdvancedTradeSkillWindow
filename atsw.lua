@@ -9,6 +9,15 @@ ATSW_MAX_TRADE_SKILL_REAGENTS = 8;
 ATSW_TRADE_SKILL_HEIGHT = 16;
 ATSW_MAX_DELAY = 4.0;
 ATSW_MAX_RETRIES = 5;
+-- Seconds to wait for the next craft of an in-flight DoTradeSkill batch before
+-- declaring the batch dead (running out of reagents mid-batch ends it silently).
+ATSW_BATCH_WATCHDOG = 2.0;
+ATSWRarityNames={};
+ATSWRarityNames["purple"]=5;
+ATSWRarityNames["blue"]=4;
+ATSWRarityNames["green"]=3;
+ATSWRarityNames["white"]=2;
+ATSWRarityNames["grey"]=1;
 
 ATSWTypeColor = { };
 ATSWTypeColor["optimal"] = { r = 1.00, g = 0.50, b = 0.25, font = GameFontNormalLeftOrange };
@@ -130,7 +139,9 @@ function ATSW_ShowWindow()
 	--end
 	atsw_oldtradeskillcount=0;
 	atsw_is_sorted=false;
-	ShowUIPanel(ATSWCheckerFrame);
+	ATSWCheckerFrame:Show(); -- OnUpdate driver: keep it OUT of the UIPanel slot system so opening
+	                         -- a merchant/mailbox/bank panel can't bump it and silently kill OnUpdate
+	                         -- (queue countdown + coalesced bag refresh freeze = "unresponsive window").
 	ShowUIPanel(ATSWFrame);
 	SetPortraitTexture(ATSWFramePortrait, "player");
 	--if(not atsw_oldmode) then
@@ -240,7 +251,7 @@ function ATSW_OnHide()
 	--else
 	--	CraftFrame_Hide();
 	--end
-	HideUIPanel(ATSWCheckerFrame);
+	ATSWCheckerFrame:Hide(); -- paired with the plain Show() in ATSW_ShowWindow (not a UIPanel)
 	HideUIPanel(ATSWReagentFrame);
 	HideUIPanel(ATSWCSFrame);
 	atsw_displayedgroup="";
@@ -520,17 +531,23 @@ function ATSWFrame_OnEvent()
 		if(arg1=="player") then ATSW_SpellcastStop(); end
 		return;
 	elseif(event=="UNIT_SPELLCAST_START") then
-		if(arg1=="player") then ATSW_SpellcastStart(); end
+		-- arg2=spellName, arg4=castID in 3.3.5a (see Reference/CastingBarFrame.lua, which
+		-- matches cast events via select(4,...)==castID). Capture the craft's identity so a
+		-- later failure can be attributed to the right cast.
+		if(arg1=="player") then ATSW_SpellcastStart(arg2, arg4); end
 		return;
 	elseif(event=="UNIT_SPELLCAST_INTERRUPTED") then
-		if(arg1=="player") then ATSW_SpellcastInterrupted(); end
+		if(arg1=="player" and ATSW_IsOurCraftCast(arg4, arg2)) then ATSW_SpellcastInterrupted(); end
 		return;
 	elseif(event=="UNIT_SPELLCAST_FAILED" or event=="UNIT_SPELLCAST_FAILED_QUIET") then
 		-- Self-cancels (moving/jumping/Esc mid-cast) fire FAILED, not STOP/INTERRUPTED.
 		-- Without this the processing state machine never tears down and the Process Queue
 		-- button stays frozen on a stale countdown. ATSW_SpellcastInterrupted self-guards
 		-- on atsw_processing, so a stray FAILED outside a queue run is a no-op.
-		if(arg1=="player") then ATSW_SpellcastInterrupted(); end
+		-- The ATSW_IsOurCraftCast gate keeps an UNRELATED failed player cast (e.g. shattering
+		-- an Eternal Earth while busy crafting, rejected with a FAILED for "player") from
+		-- tearing down the queue: that cast carries a different castID/spell name than the craft.
+		if(arg1=="player" and ATSW_IsOurCraftCast(arg4, arg2)) then ATSW_SpellcastInterrupted(); end
 		return;
 	end
 	if(not ATSWFrame:IsVisible()) then
@@ -1613,6 +1630,10 @@ end
 function ATSW_StartProcessing()
 	atsw_retries=0;
 	atsw_retry=false;
+	-- Fresh run: no craft armed yet. Cleared here so a leftover identity from a prior run
+	-- cannot match a failure event that arrives before the first UNIT_SPELLCAST_START.
+	atsw_castid=nil;
+	atsw_castspell=nil;
 	ATSWFrame:RegisterEvent("UNIT_SPELLCAST_STOP");
 	ATSWFrame:RegisterEvent("UNIT_SPELLCAST_START");
 	ATSWFrame:RegisterEvent("UNIT_SPELLCAST_CHANNEL_STOP");
@@ -1685,6 +1706,15 @@ function ATSW_SpellcastStop()
 			-- of the same recipe was queued (e.g. hitting Create again) after DoTradeSkill was
 			-- issued for the old count. Re-craft the remainder instead of freezing the queue.
 			atsw_recraft=true;
+		elseif(atsw_processingjob~=nil and atsw_processingbatch and atsw_processingbatch>0 and atsw_queue[1]==atsw_processingjob) then
+			-- More crafts were expected in this DoTradeSkill batch but the next one may never
+			-- arrive: running out of reagents mid-batch ends the repeat silently -- the last
+			-- craft completes with a normal STOP and there is NO error/interrupt event. Without
+			-- this the queue freezes with count remaining. Arm a watchdog; the next craft's
+			-- UNIT_SPELLCAST_START zeroes it, so a healthy batch never trips it. If it expires,
+			-- the batch died early and the OnUpdate timeout path finalizes the run, leaving the
+			-- unfinished count in the queue for a restock + resume.
+			atsw_processingtimeout=ATSW_BATCH_WATCHDOG;
 		end
 	else
 		atsw_processingjob=nil;
@@ -1730,12 +1760,29 @@ function ATSW_SpellcastInterrupted()
 	end
 end
 
-function ATSW_SpellcastStart()
+function ATSW_SpellcastStart(castspell, castid)
 	atsw_retry=false;
 	atsw_retrydelay=0;
 	atsw_processingtimeout=0;
 	atsw_caststarttime=GetTime();
 	atsw_castingname=atsw_processingname;
+	-- Identity of the cast now in flight, so a failure event can be told apart from an
+	-- unrelated player cast that fails while we are busy. See ATSW_IsOurCraftCast.
+	atsw_castid=castid;
+	atsw_castspell=castspell;
+end
+
+function ATSW_IsOurCraftCast(evcastid, evspell)
+	-- True when the ending cast is the craft we armed on UNIT_SPELLCAST_START, so a genuine
+	-- cancel of the craft still tears the queue down, but a different player cast that fails
+	-- while busy (shattering mats, using an item) does not. Primary discriminator is the
+	-- castID (arg4), the same field Blizzard's CastingBarFrame matches on; spell name (arg2)
+	-- is a fallback for the rare failure event that omits a castID. If we never captured a
+	-- craft identity, stay permissive so a real craft failure is never swallowed.
+	if(atsw_castid==nil and atsw_castspell==nil) then return true; end
+	if(atsw_castid~=nil and evcastid~=nil and evcastid==atsw_castid) then return true; end
+	if(atsw_castspell~=nil and evspell~=nil and evspell==atsw_castspell) then return true; end
+	return false;
 end
 
 function ATSWDBF_OnOK()
@@ -3516,7 +3563,6 @@ function ATSW_InitSlowScan()
 	if(TradeSkillFrame and TradeSkillFrame:IsVisible() and ATSW_IsCurrentlyEnabled()) then
 		ATSW_HideBlizzardTradeSkillFrame();
 	end
-	local blah=GetNumTradeSkills();
 	atsw_scan_timeout=3.0;
 	atsw_scan_state=1;
 	ATSWScanDelayFrame:Show();

@@ -1982,6 +1982,13 @@
 				</Anchors>
 				<Scripts>
 					<OnClick>
+						-- While a craft is in flight the label is the live countdown, not a
+						-- real Start/Continue/Stop state. Ignore clicks then: dispatching on the
+						-- timer text would fall through to a Stop, nil the processing job, and kill
+						-- the per-craft decrement while DoTradeSkill's repeats keep crafting.
+						if(atsw_buttontimed) then
+							return;
+						end
 						if(self:GetText()==ATSW_CONTINUEQUEUE) then
 							ATSWQueueStartStopButton:Disable();
 							ATSWQueueStartStopButton:SetText(ATSW_STARTQUEUE);
